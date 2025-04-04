@@ -1,102 +1,32 @@
 use std::process::exit;
 use std::path::PathBuf;
-use std::fs::{metadata, read_dir};
+use std::fs::DirEntry;
 use std::io::{stdin, stdout, Write};
-use std::vec;
-use crossterm::{execute, cursor, queue, ExecutableCommand};
-use crossterm::event::{self, Event, KeyEvent, KeyCode, KeyModifiers};
+use crossterm::{execute, queue, cursor};
+use crossterm::event::{self, Event, KeyCode, KeyEvent, KeyModifiers};
 use crossterm::terminal::{self, Clear, ClearType};
 
-// Values assigned for cmp
-#[derive(Debug, Clone, Eq, Ord, PartialEq, PartialOrd)]
-enum FileType {
-    Directory = 0,
-    Regular   = 1,
-    Symlink   = 2,
-    Unknown   = 3,
-}
-
-#[derive(Debug, Clone, Eq, Ord, PartialEq, PartialOrd)]
-struct FileEntry {
-    name: String,
-    kind: FileType,
-}
-
-impl FileEntry {
-    fn new(path: &PathBuf) -> Self {
-        let name = path.to_str().expect("Filename should be valid unicode")[2..].to_string();
-        let md = metadata(&path).unwrap();
-        let kind = if md.is_file() {
-            FileType::Regular
-        } else if md.is_dir() {
-            FileType::Directory
-        } else if md.is_symlink() {
-            FileType::Symlink
-        } else {
-            FileType::Unknown
-        };
-
-        Self { name, kind }
-    }
-}
-
-enum RenderKind {
-    Alphabetical,
-    FileKind,
-    Both,
-}
-
-#[derive(Clone)]
-struct Directory<'a> {
-    files: Vec<FileEntry>,
-    display: Vec<&'a FileEntry>,
-    len: u16,
-    index: u16, // this index is into display, not into files
-}
-
-impl<'a> Directory<'a> {
-    fn from(path: &PathBuf) -> Self {
-        let files = read_dir(&path).unwrap();
-        let files: Vec<FileEntry> = files
-            .map(|file| {
-                FileEntry::new(&file.unwrap().path())
-            })
-        .collect();
-
-        let size = files.len().try_into().unwrap();
-        Self {
-            files,
-            display: vec![],
-            len: size,
-            index: 0,
-        }
-    }
-
-}
 
 struct Buffer {
     pane: Pane,
+    input_buffer: Vec<char>,
     mode: Mode,
-    input: Vec<char>,
-    w: u16,
     h: u16,
+    w: u16,
 }
 
 impl Buffer {
-    fn from(pane: &Pane) -> Self {
-        let mode = Mode::Browse;
-        let pane = pane.clone();
+    fn new() -> Self {
         let (w, h) = terminal::size().unwrap();
         Self {
-            pane,
-            mode,
-            input: vec![],
+            pane: Pane::new(),
+            input_buffer: vec![],
+            mode: Mode::Browse,
             w,
             h,
         }
     }
 
-    // i should just write my own basic readline library
     fn handle_keypress(&mut self, event: &KeyEvent) {
         match self.mode {
             Mode::Browse => {
@@ -122,23 +52,29 @@ impl Buffer {
                         write!(stdout, ":").unwrap();
                     }
                     'j' => {
-                        if self.pane.directory.index < self.pane.directory.len - 1 {
-                            execute!(stdout, cursor::MoveDown(1)).unwrap();
-                            self.pane.directory.index += 1;
-                        }
+                        match &mut self.pane.contents {
+                            Some(Contents::Directory(d)) => {
+                                if d.index < d.len - 1 {
+                                    execute!(stdout, cursor::MoveDown(1)).unwrap();
+                                    d.index += 1;
+                                }
+                            }
+                            _ => {},
+                        };
                     },
                     'k' => {
-                        if self.pane.directory.index > 0 {
-                            execute!(stdout, cursor::MoveUp(1)).unwrap();
-                            self.pane.directory.index -= 1;
-                        }
+                        match &mut self.pane.contents {
+                            Some(Contents::Directory(d)) => {
+                                if d.index > 0 {
+                                    execute!(stdout, cursor::MoveUp(1)).unwrap();
+                                    d.index -= 1;
+                                }
+                            }
+                            _ => {},
+                        };
                     },
                     'h' => {},
                     'l' => {},
-
-                    // sort (cycles directory/alphabetical)
-                    's' => {
-                    },
                     _ => {},
                 },
                 _ => {},
@@ -165,18 +101,22 @@ impl Buffer {
             KeyModifiers::NONE => match event.code {
                 KeyCode::Char(key) => match key {
                     _ => {
-                        self.input.push(key);
+                        self.input_buffer.push(key);
                         write!(stdout, "{}", key).unwrap();
                     },
                 },
                 KeyCode::Backspace => {
-                    self.input.pop();
+                    self.input_buffer.pop();
                     write!(stdout, "\r").unwrap();
                 },
                 KeyCode::Esc => {
                     self.mode = Mode::Browse;
-                    let x: u16 = self.pane.x;
-                    let y: u16 = self.pane.y + self.pane.directory.index;
+
+                    let x = self.pane.x;
+                    let mut y = self.pane.y;
+                    if let Some(Contents::Directory(d)) = &self.pane.contents {
+                        y = self.pane.y + d.index;
+                    }
                     queue!(stdout, cursor::MoveTo(x, y), cursor::SetCursorStyle::SteadyBlock).unwrap();
                 },
                 _ => {},
@@ -196,63 +136,89 @@ impl Buffer {
     }
 }
 
-#[derive(Clone)]
+// Parts of the screen
 struct Pane {
-    directory: Directory<'a>,
+    contents: Option<Contents>,
     x: u16,
     y: u16,
-    w: usize,
-    h: usize,
+    w: u16,
+    h: u16,
 }
 
 impl Pane {
-    fn from(directory: &Directory) -> Self {
-        let directory: Directory = directory.clone();
+    fn new() -> Self {
         Self {
-            directory,
+            contents: None,
             x: 0,
             y: 0,
             w: 0,
             h: 0,
         }
     }
+}
 
-    fn render_dir(&self, kind: RenderKind) {
-        let mut stdout = stdout();
+struct Directory {
+    files: Vec<DirEntry>,
+    len: u16,
+    index: u16,
+}
 
-        // clear terminal
-        queue!(stdout, Clear(ClearType::All), cursor::MoveTo(0, 0)).unwrap();
-        self.directory.files.iter().for_each(|entry| self.directory.display.push(entry));
-
-        match kind {
-            RenderKind::Alphabetical => self.directory.display.sort_by(|a, b| (*a).name.cmp(&b.name)),
-            RenderKind::FileKind     => self.directory.display.sort_by(|a, b| (*a).kind.cmp(&b.kind)),
-            RenderKind::Both         => todo!("render by both"),
+impl Directory {
+    fn from(path: &PathBuf) -> Self {
+        let files = path.read_dir().unwrap();
+        let mut files: Vec<DirEntry> = files.into_iter().map(|file| file.unwrap()).collect();
+        files.sort_by_key(|name| name.path());
+        let len: u16 = files.len().try_into().expect("directory has less files than can fit in 16 bits");
+        Self {
+            files,
+            len,
+            index: 0,
         }
+    }
 
-        // Would be cool to sort by directories + names, or just either
+    fn render(&self) {
+        let mut stdout = stdout();
+        queue!(stdout, Clear(ClearType::All), cursor::MoveTo(0, 0)).unwrap();
 
-        // lets do a sort !!
-        let mut count = 0;
-        for file in self.directory.display {
-            let suffix = if file.kind == FileType::Directory {
+        for file in &self.files {
+            let md = file.file_type().unwrap();
+            let suffix = if md.is_dir() {
                 "/"
-            } else if file.kind == FileType::Symlink {
+            } else if md.is_symlink() {
                 "@"
             } else {
                 ""
             };
-
-            stdout.execute(cursor::MoveTo(0, count)).unwrap();
-            write!(stdout, "{name}{suffix}\n", name = file.name).unwrap();
-            count += 1;
+            execute!(stdout, cursor::MoveToColumn(0)).unwrap();
+            write!(stdout, "{name}{suffix}\n", name = file.path().to_str().expect("should be unicode")[2..].to_string()).unwrap();
         }
+
+        execute!(stdout, cursor::MoveTo(0, 0)).unwrap();
+        stdout.flush().unwrap();
+    }
+}
+
+enum Contents {
+    Directory(Directory),
+}
+
+impl Contents {
+    fn render(&self) {
+        match self {
+            Contents::Directory(c) => { c.render(); },
+        };
     }
 }
 
 enum Mode {
     Command,
     Browse,
+}
+
+enum SortBy {
+    Alphabetical,
+    FileKind,
+    Both,
 }
 
 fn sigint() {
@@ -263,19 +229,17 @@ fn sigint() {
 
 fn main() {
     let mut stdout = stdout();
-    let _stdin = stdin();
-
-    let path = PathBuf::from(".");
-    let directory = Directory::from(&path);
-    let pane = Pane::from(&directory);
-    let mut buffer = Buffer::from(&pane);
-
 
     execute!(stdout, terminal::EnterAlternateScreen).unwrap();
     terminal::enable_raw_mode().unwrap();
 
-    buffer.pane.render_dir(RenderKind::FileKind);
-    stdout.execute(cursor::MoveTo(0, 0)).unwrap();
+    // Make buffer, pane, directory
+    let mut buffer = Buffer::new();
+    let mut pane = Pane::new();
+    let dir = Directory::from(&PathBuf::from("."));
+    pane.contents = Some(Contents::Directory(dir));
+    if let Some(c) = &pane.contents { c.render(); }
+    buffer.pane = pane;
 
     stdout.flush().unwrap();
 
@@ -287,5 +251,4 @@ fn main() {
             _ => break,
         };
     }
-
 }
