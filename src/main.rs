@@ -1,3 +1,4 @@
+use std::fmt::write;
 use std::process::exit;
 use std::path::PathBuf;
 use std::fs::DirEntry;
@@ -27,6 +28,14 @@ impl Buffer {
         }
     }
 
+    fn process_command(&mut self, command: String) {
+        match command.as_str() {
+            "q"     => { safe_exit(); },
+            "quit"  => { safe_exit(); },
+            _ => {},
+        }
+    }
+
     fn handle_keypress(&mut self, event: &KeyEvent) {
         match self.mode {
             Mode::Browse => {
@@ -46,10 +55,11 @@ impl Buffer {
             KeyModifiers::NONE => match event.code {
                 KeyCode::Char(key) => match key {
                     ':' => {
-                        // use cursor::SavePosition here
                         self.mode = Mode::Command;
-                        queue!(stdout, cursor::MoveTo(0, self.h), cursor::SetCursorStyle::BlinkingBlock).unwrap();
-                        write!(stdout, ":").unwrap();
+                        let mut x: u16 = self.input_buffer.len().try_into().unwrap();
+                        if x > 0 { x += 1; }
+                        queue!(stdout, cursor::MoveTo(x, self.h), cursor::SetCursorStyle::BlinkingBlock).unwrap();
+                        if x == 0 { write!(stdout, ":").unwrap() }
                     }
                     'j' => {
                         match &mut self.pane.contents {
@@ -82,7 +92,7 @@ impl Buffer {
 
             KeyModifiers::CONTROL => match event.code {
                 KeyCode::Char(key) => match key {
-                    'c' => { sigint(); },
+                    'c' => { safe_exit(); },
                     _ => {},
                 },
                 _ => {},
@@ -106,12 +116,14 @@ impl Buffer {
                     },
                 },
                 KeyCode::Backspace => {
-                    self.input_buffer.pop();
-                    write!(stdout, "\r").unwrap();
+                    if self.input_buffer.len() > 0 {
+                        self.input_buffer.pop();
+                        execute!(stdout, Clear(ClearType::CurrentLine)).unwrap();
+                        write!(stdout, "\r:{}", self.input_buffer.iter().collect::<String>()).unwrap();
+                    }
                 },
                 KeyCode::Esc => {
                     self.mode = Mode::Browse;
-
                     let x = self.pane.x;
                     let mut y = self.pane.y;
                     if let Some(Contents::Directory(d)) = &self.pane.contents {
@@ -119,12 +131,19 @@ impl Buffer {
                     }
                     queue!(stdout, cursor::MoveTo(x, y), cursor::SetCursorStyle::SteadyBlock).unwrap();
                 },
+                KeyCode::Enter => {
+                    let command = self.input_buffer.iter().collect::<String>();
+                    self.input_buffer.clear();
+                    execute!(stdout, Clear(ClearType::CurrentLine)).unwrap();
+                    write!(stdout, "\r:").unwrap();
+                    self.process_command(command);
+                }
                 _ => {},
             },
 
             KeyModifiers::CONTROL => match event.code {
                 KeyCode::Char(key) => match key {
-                    'c' => { sigint(); },
+                    'c' => { safe_exit(); },
                     _ => {},
                 },
                 _ => {},
@@ -221,7 +240,7 @@ enum SortBy {
     Both,
 }
 
-fn sigint() {
+fn safe_exit() {
     terminal::disable_raw_mode().unwrap();
     execute!(stdout(), terminal::LeaveAlternateScreen).unwrap();
     exit(1);
@@ -241,6 +260,7 @@ fn main() {
     if let Some(c) = &pane.contents { c.render(); }
     buffer.pane = pane;
 
+    execute!(stdout, cursor::SetCursorStyle::SteadyBlock).unwrap();
     stdout.flush().unwrap();
 
     loop {
