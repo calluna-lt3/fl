@@ -1,7 +1,8 @@
-use std::fmt::write;
+use std::mem;
+use std::fmt::{format, write, Display};
 use std::process::exit;
 use std::path::PathBuf;
-use std::fs::DirEntry;
+use std::fs::{canonicalize, DirEntry};
 use std::io::{stdin, stdout, Write};
 use crossterm::{execute, queue, cursor};
 use crossterm::event::{self, Event, KeyCode, KeyEvent, KeyModifiers};
@@ -30,8 +31,9 @@ impl Buffer {
 
     fn process_command(&mut self, command: String) {
         match command.as_str() {
-            "q"     => { safe_exit(); },
-            "quit"  => { safe_exit(); },
+            "q"     => { exit_success(); },
+            "quit"  => { exit_success(); },
+            "find"  => { todo!("finding files"); },
             _ => {},
         }
     }
@@ -54,6 +56,8 @@ impl Buffer {
         match event.modifiers {
             KeyModifiers::NONE => match event.code {
                 KeyCode::Char(key) => match key {
+                    // TODO: implement a local save/restore, as the global one provided by cursor
+                    // doesnt work
                     ':' => {
                         self.mode = Mode::Command;
                         let mut x: u16 = self.input_buffer.len().try_into().unwrap();
@@ -84,7 +88,23 @@ impl Buffer {
                         };
                     },
                     'h' => {},
-                    'l' => {},
+                    'l' => {
+                        if let Some(c) = &self.pane.contents {
+                            match c {
+                                Contents::Directory(d)=> {
+                                    let index = d.index;
+                                    let file = d.files.get(index).expect("ui should allow selecting oob entries");
+                                    let md = file.file_type().unwrap();
+                                    if md.is_dir()  || md.is_symlink() {
+                                        self.pane.update_dir(&file.path());
+                                        if let Some(c) = &self.pane.contents {
+                                            c.render();
+                                        }
+                                    }
+                                },
+                            }
+                        }
+                    },
                     _ => {},
                 },
                 _ => {},
@@ -92,7 +112,7 @@ impl Buffer {
 
             KeyModifiers::CONTROL => match event.code {
                 KeyCode::Char(key) => match key {
-                    'c' => { safe_exit(); },
+                    'c' => { exit_with(1, "SIGINT"); },
                     _ => {},
                 },
                 _ => {},
@@ -125,9 +145,10 @@ impl Buffer {
                 KeyCode::Esc => {
                     self.mode = Mode::Browse;
                     let x = self.pane.x;
-                    let mut y = self.pane.y;
+                    let mut y: u16 = self.pane.y;
                     if let Some(Contents::Directory(d)) = &self.pane.contents {
-                        y = self.pane.y + d.index;
+                        let offset: u16 = d.index.try_into().unwrap();
+                        y = self.pane.y + offset;
                     }
                     queue!(stdout, cursor::MoveTo(x, y), cursor::SetCursorStyle::SteadyBlock).unwrap();
                 },
@@ -143,7 +164,7 @@ impl Buffer {
 
             KeyModifiers::CONTROL => match event.code {
                 KeyCode::Char(key) => match key {
-                    'c' => { safe_exit(); },
+                    'c' => { exit_with(1, "SIGINT"); },
                     _ => {},
                 },
                 _ => {},
@@ -174,12 +195,34 @@ impl Pane {
             h: 0,
         }
     }
+
+    fn update_dir(&mut self, path: &PathBuf) {
+        let files = path.read_dir().unwrap();
+        let mut files: Vec<DirEntry> = files.into_iter().map(|file| file.unwrap()).collect();
+        files.sort_by_key(|name| name.path());
+        let len = files.len();
+
+        let mut location: PathBuf = PathBuf::new();
+        if let Some(&mut c) = self.contents {
+            match c {
+                Contents::Directory(&mut d) => {
+                    d.location.push(path);
+                    let location = mem::take(d.location);
+                },
+            }
+        } else {
+            exit_with(1, format!("ERROR: '{path}' is not a directory", path = path.display()));
+        }
+
+        self.contents = Some(Contents::Directory(Directory { files, location, len, index: 0 }));
+    }
 }
 
 struct Directory {
     files: Vec<DirEntry>,
-    len: u16,
-    index: u16,
+    location: PathBuf,
+    len: usize,
+    index: usize,
 }
 
 impl Directory {
@@ -187,9 +230,10 @@ impl Directory {
         let files = path.read_dir().unwrap();
         let mut files: Vec<DirEntry> = files.into_iter().map(|file| file.unwrap()).collect();
         files.sort_by_key(|name| name.path());
-        let len: u16 = files.len().try_into().expect("directory has less files than can fit in 16 bits");
+        let len = files.len();
         Self {
             files,
+            location: PathBuf::from("."),
             len,
             index: 0,
         }
@@ -209,6 +253,7 @@ impl Directory {
                 ""
             };
             execute!(stdout, cursor::MoveToColumn(0)).unwrap();
+            // TODO: strip current directory's path from the displayed path
             write!(stdout, "{name}{suffix}\n", name = file.path().to_str().expect("should be unicode")[2..].to_string()).unwrap();
         }
 
@@ -240,7 +285,17 @@ enum SortBy {
     Both,
 }
 
-fn safe_exit() {
+fn exit_with<T>(code: i32, message: T)
+where
+    T: Display
+{
+    terminal::disable_raw_mode().unwrap();
+    execute!(stdout(), terminal::LeaveAlternateScreen).unwrap();
+    eprintln!("{message}");
+    exit(code);
+}
+
+fn exit_success() {
     terminal::disable_raw_mode().unwrap();
     execute!(stdout(), terminal::LeaveAlternateScreen).unwrap();
     exit(1);
