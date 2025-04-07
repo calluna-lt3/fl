@@ -51,38 +51,54 @@ impl Buffer {
 
     fn init(&mut self, path: &PathBuf) {
         let mut path = path.canonicalize().expect("please");
-        self.mut_center().set_dir(&PathBuf::from(&path));
+        self.center_mut().set_dir(&PathBuf::from(&path));
         path.pop();
-        self.mut_left().set_dir(&PathBuf::from(&path));
+        self.left_mut().set_dir(&PathBuf::from(&path));
         self.render();
     }
 
     // idk if this is idiomatic or not, but its easy ^^
-    fn get_center(&self)     -> &Pane     { self.panes.get(self.center).expect("center pane always in bounds") }
-    fn mut_center(&mut self) -> &mut Pane { self.panes.get_mut(self.center).expect("center pane always in bounds") }
-    fn get_left(&self)       -> &Pane     { self.panes.get(self.center.checked_sub(1).unwrap_or(2)).expect("left pane always in bounds") }
-    fn mut_left(&mut self)   -> &mut Pane { self.panes.get_mut(self.center.checked_sub(1).unwrap_or(2)).expect("left pane always in bounds") }
-    fn get_right(&self)      -> &Pane     { self.panes.get((self.center + 1) % 3).expect("right pane always in bounds") }
-    fn mut_right(&mut self)  -> &mut Pane { self.panes.get_mut((self.center + 1) % 3).expect("right pane always in bounds") }
+    fn center_mut(&mut self) -> &mut Pane { self.panes.get_mut(self.center).expect("center pane always in bounds") }
+    fn left_mut(&mut self)   -> &mut Pane { self.panes.get_mut(self.center.checked_sub(1).unwrap_or(2)).expect("left pane always in bounds") }
+    fn right_mut(&mut self)  -> &mut Pane { self.panes.get_mut((self.center + 1) % 3).expect("right pane always in bounds") }
 
-    fn preview() {
-        // TODO: render rightmost pane so that traversal is possible
+    fn center(&self) -> &Pane     { self.panes.get(self.center).expect("center pane always in bounds") }
+    fn left(&self)   -> &Pane     { self.panes.get(self.center.checked_sub(1).unwrap_or(2)).expect("left pane always in bounds") }
+    fn right(&self)  -> &Pane     { self.panes.get((self.center + 1) % 3).expect("right pane always in bounds") }
+
+    fn preview(&mut self) {
+        let mut path: Option<PathBuf> = None;
+        match &self.center().contents {
+            None => { },
+            Some(Contents::Directory(d)) => {
+                path = Some(d.files.get(d.index).unwrap().path().to_path_buf());
+            },
+        };
+
+        if let Some(path) = path {
+            if path.is_dir() {
+                self.right_mut().set_dir(&path);
+            } else {
+                self.right_mut().contents = None;
+            }
+        }
     }
 
+    // TODO: return result so you can save a render
     fn traverse_up(&mut self) {
-        let c_pane = self.mut_center();
+        let c_pane = self.center_mut();
         if let Some(c) = &c_pane.contents {
             match c {
                 Contents::Directory(d)=> {
-                    let file = d.files.get(d.index).expect("ui shouldnt allow selecting oob entries");
+                    let file = d.files.get(d.index).expect("ui shouldnt let you select oob entries");
                     let md = file.file_type().unwrap();
                     if md.is_dir() || md.is_symlink() {
                         self.center = (self.center + 1) % 3;
 
                         // TODO: i hate thiss
-                        self.mut_left().x   = 0;
-                        self.mut_center().x = self.x;
-                        self.mut_right().x  = self.x * 2;
+                        self.left_mut().x   = 0;
+                        self.center_mut().x = self.x;
+                        self.right_mut().x  = self.x * 2;
                     }
                 },
             }
@@ -90,7 +106,7 @@ impl Buffer {
     }
 
     fn traverse_down(&mut self) {
-        let mut path = match &self.get_left().contents {
+        let mut path = match &self.left().contents {
             None => { return; },
             Some(c) => {
                 match c {
@@ -103,24 +119,24 @@ impl Buffer {
         self.center = self.center.checked_sub(1).unwrap_or(2);
 
         if path.eq(&PathBuf::from("/")) {
-            self.mut_left().contents = None;
+            self.left_mut().contents = None;
         } else {
             path.pop();
-            self.mut_left().set_dir(&path);
+            self.left_mut().set_dir(&path);
         }
 
 
         // TODO: i hate thiss
-        self.mut_left().x   = 0;
-        self.mut_center().x = self.x;
-        self.mut_right().x  = self.x * 2;
+        self.left_mut().x   = 0;
+        self.center_mut().x = self.x;
+        self.right_mut().x  = self.x * 2;
     }
 
     fn browse(&mut self) {
         self.mode = Mode::Browse;
         let x = self.x;
         let mut y = self.y;
-        let c_pane = self.mut_center();
+        let c_pane = self.center_mut();
         if let Some(Contents::Directory(d)) = &c_pane.contents {
             let offset: u16 = d.index.try_into().unwrap();
             y += offset;
@@ -158,7 +174,7 @@ impl Buffer {
 
     fn browse_keypress(&mut self, event: &KeyEvent) {
         let mut stdout = stdout();
-        let c_pane = self.mut_center();
+        let c_pane = self.center_mut();
 
         match event.modifiers {
             KeyModifiers::NONE => match event.code {
@@ -166,39 +182,49 @@ impl Buffer {
                     ':' => { self.command(); }
                     'q' => { exit_success(); }
                     'j' => {
-                        match &mut c_pane.contents {
+                        let offset = match &mut c_pane.contents {
+                            None => { 0 },
                             Some(Contents::Directory(d)) => {
                                 if d.index < d.len - 1 {
-                                    execute!(stdout, cursor::MoveDown(1)).unwrap();
                                     d.index += 1;
                                 }
-                            }
-                            _ => {},
+                                d.index
+                            },
                         };
+
+                        self.preview();
+                        self.render();
+                        execute!(stdout, cursor::MoveToRow(offset.try_into().unwrap())).unwrap();
                     },
-                    'k' => {
-                        match &mut c_pane.contents {
-                            Some(Contents::Directory(d)) => {
-                                if d.index > 0 {
-                                    execute!(stdout, cursor::MoveUp(1)).unwrap();
-                                    d.index -= 1;
-                                }
+                'k' => {
+                    let offset = match &mut c_pane.contents {
+                        None => { 0 },
+                        Some(Contents::Directory(d)) => {
+                            if d.index > 0 {
+                                d.index -= 1;
                             }
-                            _ => {},
-                        };
-                    },
-                    'h' => {
-                        self.traverse_down();
-                        self.render();
-                    },
-                    'l' => {
-                        self.traverse_up();
-                        self.render();
-                    },
-                    _ => {},
+                            d.index
+                        }
+                    };
+
+                    self.preview();
+                    self.render();
+                    execute!(stdout, cursor::MoveToRow(offset.try_into().unwrap())).unwrap();
+                },
+                'h' => {
+                    self.traverse_down();
+                    self.preview();
+                    self.render();
+                },
+                'l' => {
+                    self.traverse_up();
+                    self.preview();
+                    self.render();
                 },
                 _ => {},
             },
+            _ => {},
+        },
 
             KeyModifiers::CONTROL => match event.code {
                 KeyCode::Char(key) => match key {
@@ -263,7 +289,10 @@ impl Buffer {
     fn render(&self) {
         execute!(stdout(), Clear(ClearType::All)).unwrap();
         self.panes.iter().for_each(|p| p.try_render());
-        execute!(stdout(), cursor::MoveTo(self.x, self.y)).unwrap();
+
+        if let Some(Contents::Directory(d)) = &self.center().contents {
+            execute!(stdout(), cursor::MoveTo(self.x, d.index.try_into().unwrap())).unwrap();
+        }
     }
 }
 
