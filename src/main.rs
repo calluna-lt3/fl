@@ -4,7 +4,7 @@ use std::fmt::{format, Display};
 use std::process::exit;
 use std::path::PathBuf;
 use std::fs::{DirEntry, File};
-use std::io::{stdout, Write};
+use std::io::{self, stdout, Write};
 use crossterm::{execute, queue, cursor};
 use crossterm::event::{self, Event, KeyCode, KeyEvent, KeyModifiers};
 use crossterm::terminal::{self, Clear, ClearType};
@@ -77,7 +77,10 @@ impl Buffer {
 
         if let Some(path) = path {
             if path.is_dir() {
-                self.right_mut().set_dir(&path);
+                let right = self.right_mut();
+                if let Err(_) = right.set_dir(&path){
+                    right.contents = None;
+                };
             } else {
                 self.right_mut().contents = None;
             }
@@ -95,7 +98,7 @@ impl Buffer {
                     if md.is_dir() || md.is_symlink() {
                         self.center = (self.center + 1) % 3;
 
-                        // TODO: i hate thiss
+                        // TODO: dynamic
                         self.left_mut().x   = 0;
                         self.center_mut().x = self.x;
                         self.right_mut().x  = self.x * 2;
@@ -316,9 +319,8 @@ impl Pane {
         }
     }
 
-    fn set_dir(&mut self, path: &PathBuf) {
-        // TODO: handle no permission error
-        let files = path.read_dir().unwrap();
+    fn set_dir(&mut self, path: &PathBuf) -> io::Result<()> {
+        let files = path.read_dir()?;
         let mut files: Vec<DirEntry> = files.into_iter().map(|file| file.unwrap()).collect();
         files.sort_by_key(|name| name.path());
         let len = files.len();
@@ -326,6 +328,7 @@ impl Pane {
         // NOTE: revisit this, i think this needs to be fixed
         let location = PathBuf::from(path);
         self.contents = Some(Contents::Directory(Directory { files, location, len, index: 0 }));
+        Ok(())
     }
 
     // TODO: do something on None, will be useful when trying to render unsupported types
